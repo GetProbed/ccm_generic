@@ -13,7 +13,16 @@ function Remove-SCCMFailedContent {
     $SiteCode = "CM1"   # Replace with your SCCM Site Code
 
     # Retrieve content information from WMI for anything that is not in a success state
-    $wmiQuery = "SELECT * FROM SMS_PackageStatusDistPointsSummarizer WHERE StateType != 1 AND SiteCode = '$SiteCode' AND ServerNALPath LIKE '%$DistributionPoint%'"
+    $wmiQuery = @"
+        SELECT 
+            PS.PackageID, PS.PackageType, PS.StateType, PS.ServerNALPath, Pkg.Name AS PackageName
+        FROM 
+            SMS_PackageStatusDistPointsSummarizer PS
+        JOIN 
+            SMS_Package Pkg ON PS.PackageID = Pkg.PackageID
+        WHERE 
+            PS.StateType != 1 AND PS.SiteCode = '$SiteCode' AND PS.ServerNALPath LIKE '%$DistributionPoint%'
+"@
     $failedContent = Get-WmiObject -Namespace "root\SMS\site_$SiteCode" -Query $wmiQuery
 
     # Check if there's any content to remove or redistribute
@@ -40,7 +49,7 @@ function Remove-SCCMFailedContent {
             Name = $content.PackageName
             Type = $content.PackageType
             State = $state[$content.StateType]
-            SourcePath = $content.SourceNALPath
+            SourcePath = $content.ServerNALPath
         }
         $contentList += $contentInfo
     }
@@ -84,7 +93,7 @@ function Remove-SCCMFailedContent {
                                 return
                             }
                         }
-                        Write-Host "Content with Package ID $packageID, Type $contentType, and State $packageState has been removed successfully from $DistributionPoint."
+                        Write-Host "Content with Package ID $packageID, Name $content.Name, Type $contentType, and State $packageState has been removed successfully from $DistributionPoint."
                     } elseif ($selectedAction -eq "Redistribute") {
                         # Redistribute the content using WMI method
                         $failedPackageIDs = $failedContent | Where-Object { $_.PackageID -eq $packageID } | Select-Object -ExpandProperty PackageID
@@ -94,7 +103,7 @@ function Remove-SCCMFailedContent {
                             if ($package) {
                                 $package.RefreshNow = $true
                                 $package.Put_()
-                                Write-Host "Content with Package ID $failedPackageID, Type $contentType, and State $packageState has been redistributed successfully on $DistributionPoint."
+                                Write-Host "Content with Package ID $failedPackageID, Name $content.Name, Type $contentType, and State $packageState has been redistributed successfully on $DistributionPoint."
                             }
                         }
                     } else {
@@ -102,7 +111,7 @@ function Remove-SCCMFailedContent {
                         return
                     }
                 } catch {
-                    Write-Host "Failed to perform the action for content with Package ID $packageID, Type $contentType, and State $packageState on $DistributionPoint." -ForegroundColor Red
+                    Write-Host "Failed to perform the action for content with Package ID $packageID, Name $content.Name, Type $contentType, and State $packageState on $DistributionPoint." -ForegroundColor Red
                     Write-Host "Error: $_" -ForegroundColor Red
                 }
             }
