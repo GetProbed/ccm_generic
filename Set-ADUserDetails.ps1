@@ -1,224 +1,151 @@
-﻿Import-Module ActiveDirectory
 Add-Type -AssemblyName System.Windows.Forms
+Import-Module ActiveDirectory
 
-$timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-$logPath = "$env:TEMP\ADUserUpdateLog_$timestamp.csv"
-"d,Timestamp,User,Field,OldValue,NewValue,DryRun" | Out-File -FilePath $logPath -Encoding UTF8
+# ===== CONFIG =====
+$dryRun = $true
+$logPath = "$env:TEMP\ADUserUpdateLog_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
 
-function Log-Update {
-    param (
-        [string]$User,
-        [hashtable]$Changes,
-        [bool]$DryRun
-    )
-    $now = Get-Date -Format 's'
-    if ($Changes.Count -eq 0) {
-        "$now,$User,None,None,None,None,$DryRun" | Out-File -FilePath $logPath -Append
-    } else {
-        foreach ($key in $Changes.Keys) {
-            $old = $Changes[$key].Old -replace ",", ";"
-            $new = $Changes[$key].New -replace ",", ";"
-            "$now,$User,$key,$old,$new,$DryRun" | Out-File -FilePath $logPath -Append
-        }
-    }
-}
-
-function Ask-DryRun {
-    $result = [System.Windows.Forms.MessageBox]::Show("Run in dry-run mode (no actual AD updates)?", "Dry Run?", "YesNo", "Question")
-    return ($result -eq 'Yes')
-}
-
-function Show-DetailsForm {
-    $form = New-Object System.Windows.Forms.Form
-    $form.Text = "Enter Shared User Details"
-    $form.Size = '300,480'
-    $form.StartPosition = "CenterScreen"
-
-    $labels = @(
-        "Address:", "Phone Number:", "Post Code:",
-        "State:", "Suburb:", "Department:", "Job Title:"
-    )
-    $textboxes = @()
-
-    for ($i = 0; $i -lt $labels.Length; $i++) {
-        $label = New-Object System.Windows.Forms.Label
-        $label.Text = $labels[$i]
-        $label.Location = "10,$(20 + ($i * 40))"
-        $label.Size = '120,20'
-        $form.Controls.Add($label)
-
-        $textbox = New-Object System.Windows.Forms.TextBox
-        $textbox.Location = "140,$(20 + ($i * 40))"
-        $textbox.Size = '120,20'
-        $form.Controls.Add($textbox)
-
-        $textboxes += $textbox
-    }
-
-    $submitButton = New-Object System.Windows.Forms.Button
-    $submitButton.Text = "Next"
-    $submitButton.Location = '90,400'
-    $submitButton.Add_Click({
-        $form.Tag = $true
-        $form.Close()
-    })
-    $form.Controls.Add($submitButton)
-
-    $form.ShowDialog() | Out-Null
-    return if ($form.Tag) { $textboxes | ForEach-Object { $_.Text } } else { $null }
-}
-
-function Show-UserSearchForm {
-    $input = [System.Windows.Forms.Interaction]::InputBox("Enter name (wildcards like *smith*)", "Search AD Users", "*")
-    if (-not $input) { return $null }
-
+# ===== FUNCTIONS =====
+function Select-DomainController {
     try {
-        $users = Get-ADUser -Filter "Name -like '$input'" -Properties SamAccountName, Name, StreetAddress, TelephoneNumber, PostalCode, State, City, Department, Title
+        $forest = [System.DirectoryServices.ActiveDirectory.Forest]::GetCurrentForest()
+        $dcList = $forest.Domains | ForEach-Object { $_.DomainControllers } | Select-Object -ExpandProperty Name
+        if (-not $dcList) { throw "No domain controllers found" }
+
+        $form = New-Object Windows.Forms.Form
+        $form.Text = "Select Domain Controller"
+        $form.Size = '400,200'
+        $combo = New-Object Windows.Forms.ComboBox
+        $combo.DropDownStyle = 'DropDownList'
+        $combo.Location = '30,40'
+        $combo.Size = '320,30'
+        $combo.Items.AddRange($dcList)
+        $combo.SelectedIndex = 0
+        $form.Controls.Add($combo)
+        $okButton = New-Object Windows.Forms.Button
+        $okButton.Text = "OK"
+        $okButton.Location = '150,100'
+        $okButton.Add_Click({ $form.Tag = $combo.SelectedItem; $form.Close() })
+        $form.Controls.Add($okButton)
+        $form.ShowDialog() | Out-Null
+        return $form.Tag
     } catch {
-        [System.Windows.Forms.MessageBox]::Show("Failed to query AD: $_")
+        [Windows.Forms.MessageBox]::Show("Error: $_")
         return $null
     }
-
-    if (-not $users) {
-        [System.Windows.Forms.MessageBox]::Show("No users found.")
-        return $null
-    }
-
-    $form = New-Object System.Windows.Forms.Form
-    $form.Text = "Select Users"
-    $form.Size = '650,500'
-    $form.StartPosition = "CenterScreen"
-
-    $panel = New-Object System.Windows.Forms.Panel
-    $panel.Location = '10,10'
-    $panel.Size = '610,400'
-    $panel.AutoScroll = $true
-    $form.Controls.Add($panel)
-
-    $checkboxes = @()
-    $y = 0
-    foreach ($user in $users) {
-        $cb = New-Object System.Windows.Forms.CheckBox
-        $cb.Text = "$($user.Name) [$($user.SamAccountName)]"
-        $cb.Tag = $user
-        $cb.Location = "10,$y"
-        $cb.Width = 580
-        $panel.Controls.Add($cb)
-        $checkboxes += $cb
-        $y += 25
-    }
-
-    $nextButton = New-Object System.Windows.Forms.Button
-    $nextButton.Text = "Preview Changes"
-    $nextButton.Location = '250,420'
-    $nextButton.Add_Click({
-        $selected = $checkboxes | Where-Object { $_.Checked } | ForEach-Object { $_.Tag }
-        if (-not $selected) {
-            [System.Windows.Forms.MessageBox]::Show("Please select at least one user.")
-            return
-        }
-        $form.Tag = $selected
-        $form.Close()
-    })
-    $form.Controls.Add($nextButton)
-
-    $form.ShowDialog() | Out-Null
-    return $form.Tag
 }
 
-function Show-PreviewForm {
-    param ($users, $newProps)
+function Log-Change {
+    param($User, $Field, $Old, $New, $Status)
+    "$User,$Field,$Old,$New,$Status" | Out-File -FilePath $logPath -Append -Encoding UTF8
+}
 
-    $form = New-Object System.Windows.Forms.Form
-    $form.Text = "Preview Updates"
+# ===== GUI FORM =====
+function Show-UpdateForm {
+    param ($dc)
+
+    $form = New-Object Windows.Forms.Form
+    $form.Text = "AD User Updater"
     $form.Size = '800,500'
     $form.StartPosition = "CenterScreen"
 
-    $list = New-Object System.Windows.Forms.ListView
-    $list.View = 'Details'
-    $list.FullRowSelect = $true
-    $list.GridLines = $true
-    $list.Location = '10,10'
-    $list.Size = '760,400'
+    # Left Panel - User List
+    $userList = New-Object Windows.Forms.CheckedListBox
+    $userList.Location = '10,10'
+    $userList.Size = '300,400'
+    $form.Controls.Add($userList)
 
-    $columns = @("User", "Field", "Old Value", "New Value")
-    foreach ($col in $columns) {
-        $list.Columns.Add($col, 180)
+    # Search box
+    $searchBox = New-Object Windows.Forms.TextBox
+    $searchBox.Location = '10,420'
+    $searchBox.Size = '200,25'
+    $form.Controls.Add($searchBox)
+
+    $searchBtn = New-Object Windows.Forms.Button
+    $searchBtn.Text = "Search"
+    $searchBtn.Location = '220,420'
+    $searchBtn.Add_Click({
+        $userList.Items.Clear()
+        $users = Get-ADUser -Filter "Name -like '*$($searchBox.Text)*'" -Properties * -Server $dc
+        $global:selectedObjects = @()
+        foreach ($user in $users) {
+            $userList.Items.Add($user, $false)
+        }
+    })
+    $form.Controls.Add($searchBtn)
+
+    # Right Panel - Fields
+    $labels = "Address","Phone","Post Code","State","Suburb","Department","Job Title"
+    $props  = "StreetAddress","TelephoneNumber","PostalCode","State","City","Department","Title"
+    $textBoxes = @{}
+    for ($i = 0; $i -lt $labels.Length; $i++) {
+        $lbl = New-Object Windows.Forms.Label
+        $lbl.Text = $labels[$i]
+        $lbl.Location = "330,$(20 + ($i * 35))"
+        $lbl.Size = '100,25'
+        $form.Controls.Add($lbl)
+
+        $txt = New-Object Windows.Forms.TextBox
+        $txt.Location = "450,$(20 + ($i * 35))"
+        $txt.Size = '300,25'
+        $form.Controls.Add($txt)
+
+        $textBoxes[$props[$i]] = $txt
     }
 
-    foreach ($user in $users) {
-        foreach ($key in $newProps.Keys) {
-            $newVal = $newProps[$key]
-            if (![string]::IsNullOrWhiteSpace($newVal)) {
-                $oldVal = $user.$key
-                if ($oldVal -ne $newVal) {
-                    $item = New-Object System.Windows.Forms.ListViewItem("$($user.SamAccountName)")
-                    $item.SubItems.Add($key)
-                    $item.SubItems.Add($oldVal)
-                    $item.SubItems.Add($newVal)
-                    $list.Items.Add($item)
+    # Apply Button
+    $applyBtn = New-Object Windows.Forms.Button
+    $applyBtn.Text = "Apply"
+    $applyBtn.Location = '600,400'
+    $applyBtn.Add_Click({
+        $sharedProps = @{}
+        foreach ($key in $textBoxes.Keys) {
+            if ($textBoxes[$key].Text -ne '') {
+                $sharedProps[$key] = $textBoxes[$key].Text
+            }
+        }
+
+        $targets = @()
+        foreach ($item in $userList.CheckedItems) {
+            $targets += $item
+        }
+
+        if (-not $targets) {
+            [Windows.Forms.MessageBox]::Show("No users selected.")
+            return
+        }
+
+        foreach ($user in $targets) {
+            $original = Get-ADUser -Identity $user.SamAccountName -Properties * -Server $dc
+            foreach ($key in $sharedProps.Keys) {
+                $old = $original.$key
+                $new = $sharedProps[$key]
+                if ($old -ne $new) {
+                    try {
+                        if (-not $dryRun) {
+                            Set-ADUser -Identity $original -Replace @{ $key = $new } -Server $dc
+                        }
+                        Log-Change -User $user.SamAccountName -Field $key -Old $old -New $new -Status "Success"
+                    } catch {
+                        Log-Change -User $user.SamAccountName -Field $key -Old $old -New $new -Status "Failed: $_"
+                    }
                 }
             }
         }
-    }
 
-    $form.Controls.Add($list)
-
-    $applyButton = New-Object System.Windows.Forms.Button
-    $applyButton.Text = "Apply Changes"
-    $applyButton.Location = '320,420'
-    $applyButton.Add_Click({
-        $form.Tag = $true
+        [Windows.Forms.MessageBox]::Show("Completed. Log: $logPath")
+        Start-Process notepad.exe $logPath
         $form.Close()
     })
-    $form.Controls.Add($applyButton)
+    $form.Controls.Add($applyBtn)
 
-    $form.ShowDialog() | Out-Null
-    return $form.Tag
+    $form.ShowDialog()
 }
 
-# MAIN EXECUTION
-$dryRun = Ask-DryRun
-$sharedProps = Show-DetailsForm
-if (-not $sharedProps) { return }
+# ===== RUN SCRIPT =====
+$dc = Select-DomainController
+if (-not $dc) { return }
 
-$props = @{
-    StreetAddress   = $sharedProps[0]
-    TelephoneNumber = $sharedProps[1]
-    PostalCode      = $sharedProps[2]
-    State           = $sharedProps[3]
-    City            = $sharedProps[4]
-    Department      = $sharedProps[5]
-    Title           = $sharedProps[6]
-}
+"User,Field,Old,New,Status" | Out-File -FilePath $logPath -Encoding UTF8
 
-$selectedUsers = Show-UserSearchForm
-if (-not $selectedUsers) { return }
-
-$confirmed = Show-PreviewForm -users $selectedUsers -newProps $props
-if (-not $confirmed) { return }
-
-foreach ($user in $selectedUsers) {
-    $changes = @{}
-    try {
-        foreach ($key in $props.Keys) {
-            $newVal = $props[$key]
-            if (![string]::IsNullOrWhiteSpace($newVal)) {
-                $oldVal = $user.$key
-                if ($oldVal -ne $newVal) {
-                    if (-not $dryRun) {
-                        Set-ADUser -Identity $user.SamAccountName -Replace @{ $key = $newVal }
-                    }
-                    $changes[$key] = @{ Old = $oldVal; New = $newVal }
-                }
-            }
-        }
-        Log-Update -User $user.SamAccountName -Changes $changes -DryRun:$dryRun
-    } catch {
-        $now = Get-Date -Format 's'
-        "$now,$($user.SamAccountName),ERROR,$_,$dryRun" | Out-File -FilePath $logPath -Append
-    }
-}
-
-[System.Windows.Forms.MessageBox]::Show("Update process completed.`nOpening log file...", "Done", 'OK', 'Information')
-Start-Process notepad.exe $logPath
+Show-UpdateForm -dc $dc
