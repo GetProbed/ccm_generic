@@ -15,6 +15,8 @@ function Select-DomainController {
         $form = New-Object Windows.Forms.Form
         $form.Text = "Select Domain Controller"
         $form.Size = '400,200'
+        $form.StartPosition = 'CenterScreen'
+
         $combo = New-Object Windows.Forms.ComboBox
         $combo.DropDownStyle = 'DropDownList'
         $combo.Location = '30,40'
@@ -22,11 +24,19 @@ function Select-DomainController {
         $combo.Items.AddRange($dcList)
         $combo.SelectedIndex = 0
         $form.Controls.Add($combo)
+
         $okButton = New-Object Windows.Forms.Button
         $okButton.Text = "OK"
-        $okButton.Location = '150,100'
+        $okButton.Location = '90,100'
         $okButton.Add_Click({ $form.Tag = $combo.SelectedItem; $form.Close() })
         $form.Controls.Add($okButton)
+
+        $cancelButton = New-Object Windows.Forms.Button
+        $cancelButton.Text = "Cancel"
+        $cancelButton.Location = '200,100'
+        $cancelButton.Add_Click({ $form.Tag = $null; $form.Close() })
+        $form.Controls.Add($cancelButton)
+
         $form.ShowDialog() | Out-Null
         return $form.Tag
     } catch {
@@ -49,18 +59,15 @@ function Show-UpdateForm {
     $form.Size = '800,500'
     $form.StartPosition = "CenterScreen"
 
-    # Field mappings
     $labels = "Address","Phone","Post Code","State","Suburb","Department","Job Title"
     $props  = "StreetAddress","TelephoneNumber","PostalCode","State","City","Department","Title"
     $textBoxes = @{}
 
-    # Left Panel - User List
     $userList = New-Object Windows.Forms.CheckedListBox
     $userList.Location = '10,10'
     $userList.Size = '300,400'
     $form.Controls.Add($userList)
 
-    # Right Panel - Fields
     for ($i = 0; $i -lt $labels.Length; $i++) {
         $lbl = New-Object Windows.Forms.Label
         $lbl.Text = $labels[$i]
@@ -76,7 +83,6 @@ function Show-UpdateForm {
         $textBoxes[$props[$i]] = $txt
     }
 
-    # Search box
     $searchBox = New-Object Windows.Forms.TextBox
     $searchBox.Location = '10,420'
     $searchBox.Size = '200,25'
@@ -98,9 +104,8 @@ function Show-UpdateForm {
     })
     $form.Controls.Add($searchBtn)
 
-    # Auto-fill on item check
     $userList.Add_ItemCheck({
-        Start-Sleep -Milliseconds 100 # Let .CheckedItems update
+        Start-Sleep -Milliseconds 100
         $checked = @()
         foreach ($item in $userList.CheckedItems) { $checked += $item }
 
@@ -114,7 +119,6 @@ function Show-UpdateForm {
         }
     })
 
-    # Apply Button
     $applyBtn = New-Object Windows.Forms.Button
     $applyBtn.Text = "Apply"
     $applyBtn.Location = '600,400'
@@ -164,12 +168,24 @@ function Show-UpdateForm {
     })
     $form.Controls.Add($applyBtn)
 
+    $cancelBtn = New-Object Windows.Forms.Button
+    $cancelBtn.Text = "Cancel"
+    $cancelBtn.Location = '500,400'
+    $cancelBtn.Add_Click({
+        [Windows.Forms.MessageBox]::Show("Operation cancelled by user.")
+        $form.Close()
+    })
+    $form.Controls.Add($cancelBtn)
+
     $form.ShowDialog()
 }
 
 # ===== RUN SCRIPT =====
 $dc = Select-DomainController
-if (-not $dc) { return }
+if (-not $dc) {
+    [System.Windows.Forms.MessageBox]::Show("Script cancelled. No domain controller selected.")
+    return
+}
 
 "User,Field,Old,New,Status" | Out-File -FilePath $logPath -Encoding UTF8
 Show-UpdateForm -dc $dc
